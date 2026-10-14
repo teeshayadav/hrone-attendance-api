@@ -59,15 +59,19 @@ def compute_late_minutes(punch_in: datetime, shift_start: str, date_str: str) ->
     seconds = int((punch_in - start).total_seconds())
     return seconds // 60 if seconds > 600 else 0
 
+def as_utc(dt: datetime) -> datetime:
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
-    return round((punch_out - punch_in).total_seconds() / 3600, 2)
+        return round((as_utc(punch_out) - as_utc(punch_in)).total_seconds() / 3600, 2)
 
 
-def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
+def compute_overtime(punch_out: datetime, shift_start: str, shift_end: str, date_str: str) -> int:
     h, m = map(int, shift_end.split(":"))
     end = datetime.fromisoformat(date_str).replace(hour=h, minute=m, tzinfo=IST)
-    return max(0, int((punch_out - end).total_seconds() / 60))
+    if shift_end <= shift_start:
+        end += timedelta(days=1)
+    return max(0, int((as_utc(punch_out) - end).total_seconds() // 60))
 
 
 # --------------------------------------------------------------------------- #
@@ -90,7 +94,7 @@ class EmployeeIn(BaseModel):
         except ValueError:
             raise ValueError("joined_on must be a real date (YYYY-MM-DD)")
         return v
-        
+
 class PunchInIn(BaseModel):
     emp_code: str
     punched_at: Optional[StrictInt] = Field(default=None, ge=100000000000, le=4102444800000)
