@@ -15,7 +15,7 @@ from typing import Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field, StrictInt
+from pydantic import BaseModel, Field, StrictInt, field_validator
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
@@ -26,7 +26,14 @@ db = client[os.getenv("MONGO_DB", "attendance_db")]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(app):
+    db.employees.create_index("emp_code", unique=True)
+    db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
+    yield
+
+
+app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
 def to_millis(dt):
     dt = dt.replace(tzinfo=timezone.utc)
     return int(dt.timestamp() * 1000)
@@ -75,7 +82,15 @@ class EmployeeIn(BaseModel):
     shift_end: str = Field(default="18:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     joined_on: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
 
-
+    @field_validator("joined_on")
+    @classmethod
+    def joined_on_must_be_real_date(cls, v):
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("joined_on must be a real date (YYYY-MM-DD)")
+        return v
+        
 class PunchInIn(BaseModel):
     emp_code: str
     punched_at: Optional[StrictInt] = Field(default=None, ge=100000000000, le=4102444800000)
@@ -91,13 +106,16 @@ def health():
 
 
 @app.post("/employees", status_code=201)
+@app.post("/employees", status_code=201)
 def create_employee(body: EmployeeIn):
-    if db.employees.find_one({"emp_code": body.emp_code}):
-        raise HTTPException(409, "emp_code already exists")
     doc = body.model_dump()
-    doc["created_at"] = datetime.now(timezone.utc)
-    doc["created_at"] = to_millis(doc["created_at"])
+    doc["created_at"] = datetime.now(timezone.utc).replace(microsecond=0)
+    try:
+        db.employees.insert_one(doc)
+    except DuplicateKeyError:
+        raise HTTPException(409, "emp_code already exists")
     doc.pop("_id", None)
+    doc["created_at"] = to_millis(doc["created_at"])
     return doc
 
 
