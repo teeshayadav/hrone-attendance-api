@@ -11,6 +11,7 @@ openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
@@ -63,15 +64,17 @@ def as_utc(dt: datetime) -> datetime:
     return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
 
 def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
-        return round((as_utc(punch_out) - as_utc(punch_in)).total_seconds() / 3600, 2)
-
+    seconds = int((as_utc(punch_out) - as_utc(punch_in)).total_seconds())
+    hours = (Decimal(seconds) / Decimal(3600)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return float(hours)
 
 def compute_overtime(punch_out: datetime, shift_start: str, shift_end: str, date_str: str) -> int:
     h, m = map(int, shift_end.split(":"))
     end = datetime.fromisoformat(date_str).replace(hour=h, minute=m, tzinfo=IST)
     if shift_end <= shift_start:
         end += timedelta(days=1)
-    return max(0, int((as_utc(punch_out) - end).total_seconds() // 60))
+    minutes = int((as_utc(punch_out) - end).total_seconds() // 60)
+    return minutes if minutes >= 30 else 0
 
 
 # --------------------------------------------------------------------------- #
