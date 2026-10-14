@@ -1,0 +1,9 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+sample_data/
+sample_seed.py
+PROBLEM_STATEMENT.docx
+openapi.yaml
+DATA_MODEL.md
