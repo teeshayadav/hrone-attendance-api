@@ -103,6 +103,10 @@ class PunchInIn(BaseModel):
     punched_at: Optional[StrictInt] = Field(default=None, ge=100000000000, le=4102444800000)
     status: Literal["PRESENT", "WFH", "ON_DUTY"] = "PRESENT"
 
+class PunchOutIn(BaseModel):
+    emp_code: str
+    punched_at: Optional[StrictInt] = Field(default=None, ge=100000000000, le=4102444800000)
+
 
 # --------------------------------------------------------------------------- #
 # Endpoints provided
@@ -169,6 +173,46 @@ def punch_in(body: PunchInIn):
     doc["punch_in"] = to_millis(doc["punch_in"])
     return doc
 
+@app.post("/attendance/punch-out")
+@app.post("/attendance/punch-out")
+def punch_out(body: PunchOutIn):
+    emp = db.employees.find_one({"emp_code": body.emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+    if body.punched_at is not None:
+        ts = from_millis(body.punched_at)
+    else:
+        ts = datetime.now(timezone.utc).replace(microsecond=0)
+    rec = db.attendance_logs.find_one(
+        {"emp_code": body.emp_code, "punch_in": {"$lte": ts}},
+        sort=[("punch_in", -1)],
+    )
+    if not rec:
+        raise HTTPException(404, "no punch-in found")
+    if rec["punch_out"] is not None:
+        raise HTTPException(409, "already punched out")
+    pin = as_utc(rec["punch_in"])
+    if ts <= pin or ts > pin + timedelta(hours=24):
+        raise HTTPException(422, "punched_at must be after punch_in and within 24 hours")
+    work_hours = compute_work_hours(pin, ts)
+    overtime = compute_overtime(ts, emp["shift_start"], emp["shift_end"], rec["date"])
+    updated = db.attendance_logs.find_one_and_update(
+        {"_id": rec["_id"], "punch_out": None},
+        {"$set": {
+            "punch_out": ts,
+            "work_hours": work_hours,
+            "overtime_minutes": overtime,
+            "half_day": work_hours < 4.5,
+        }},
+        return_document=True,
+    )
+    if updated is None:
+        raise HTTPException(409, "already punched out")
+    updated.pop("_id", None)
+    updated["punch_in"] = to_millis(updated["punch_in"])
+    updated["punch_out"] = to_millis(updated["punch_out"])
+    return updated
+    
 @app.get("/attendance")
 def list_attendance(
     emp_code: Optional[str] = None,
