@@ -17,9 +17,11 @@ Indexes are created at startup.
 - GET /analytics/employees/{emp_code}/monthly
 - GET /analytics/departments/summary
 - GET /analytics/leaderboard/late
-- GET /admin/explain/{endpoint} for attendance_list, employee_monthly, department_summary and late_leaderboard
+- GET /analytics/departments/{department}/trend
+- GET /admin/explain/{endpoint} for all five endpoints
 - REVIEW.md (defects found in the starter code) and DECISIONS.md
 
-## Not done yet
-- GET /analytics/departments/{department}/trend
-- /admin/explain/department_trend (returns 501 until the trend endpoint exists)
+## Not done / limits
+- All endpoints were tested by hand in Swagger with the sample seed data.
+- The IXSCAN check on /admin/explain was done on that small data, not on a 100k-record dataset.
+- No automated tests are included.
