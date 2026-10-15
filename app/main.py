@@ -379,6 +379,75 @@ def regularize(emp_code: str, date: str, body: RegularizeIn):
     if updated is None:
         raise HTTPException(409, "record was changed by someone else, retry")
     return format_record(updated)
+
+MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
+
+
+def round_half_up(x, places=2) -> float:
+    q = Decimal(1).scaleb(-places)
+    return float(Decimal(str(x)).quantize(q, rounding=ROUND_HALF_UP))
+
+
+def weekday_dates(month: str):
+    y, m = map(int, month.split("-"))
+    day = datetime(y, m, 1)
+    out = []
+    while day.month == m:
+        if day.weekday() < 5:
+            out.append(day.strftime("%Y-%m-%d"))
+        day += timedelta(days=1)
+    return out
+
+
+def working_days_in_month(month: str, joined_on: str) -> int:
+    return sum(1 for d in weekday_dates(month) if d >= joined_on)
+
+
+def monthly_pipeline(emp_code: str, month: str):
+    weekdays = weekday_dates(month)
+    return [
+        {"$match": {"emp_code": emp_code, "date": {"$gte": f"{month}-01", "$lte": f"{month}-31"}}},
+        {"$group": {
+            "_id": None,
+            "present_days": {"$sum": {"$cond": [
+                {"$and": [
+                    {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
+                    {"$in": ["$date", weekdays]},
+                ]},
+                {"$cond": [{"$eq": [{"$ifNull": ["$half_day", False]}, True]}, 0.5, 1]},
+                0,
+            ]}},
+            "leave_days": {"$sum": {"$cond": [{"$eq": ["$status", "LEAVE"]}, 1, 0]}},
+            "late_count": {"$sum": {"$cond": [{"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0]}},
+            "total_late_minutes": {"$sum": {"$ifNull": ["$late_minutes", 0]}},
+            "total_overtime_minutes": {"$sum": {"$ifNull": ["$overtime_minutes", 0]}},
+        }},
+    ]
+
+
+@app.get("/analytics/employees/{emp_code}/monthly")
+def employee_monthly(emp_code: str, month: str = Query(pattern=MONTH_PATTERN)):
+    emp = db.employees.find_one({"emp_code": emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+    rows = list(db.attendance_logs.aggregate(monthly_pipeline(emp_code, month)))
+    agg = rows[0] if rows else {}
+    wd = working_days_in_month(month, emp["joined_on"])
+    present = agg.get("present_days", 0)
+    pct = None
+    if wd > 0:
+        pct = round_half_up(Decimal(str(present)) / Decimal(wd) * 100, 2)
+    return {
+        "emp_code": emp_code,
+        "month": month,
+        "working_days": wd,
+        "present_days": present,
+        "leave_days": agg.get("leave_days", 0),
+        "late_count": agg.get("late_count", 0),
+        "total_late_minutes": agg.get("total_late_minutes", 0),
+        "total_overtime_minutes": agg.get("total_overtime_minutes", 0),
+        "attendance_pct": pct,
+    }
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
 #   POST  /attendance/punch-out
