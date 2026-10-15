@@ -1,6 +1,6 @@
 ## 1. Indexes
 
-I use a unique `emp_code` index to prevent duplicate employees, a unique `(emp_code, date)` index to prevent duplicate daily attendance, `(date DESC, emp_code ASC)` for attendance sorting, and `(department, emp_code)` for department filtering. I rejected a `status` index because it has only 5 values, so it offers little benefit and adds write cost.I also use (joined_on, department) to support the month-end headcount filter.
+I use a unique emp_code index to prevent duplicate employees, a unique (emp_code, date) index to prevent duplicate daily attendance, (date DESC, emp_code ASC) for attendance sorting, (department, emp_code) for department filtering, and (joined_on, department) for month-end headcount filtering. I rejected a status index because it has only 5 values and adds write cost.
 
 ## 2. Race Condition
 
