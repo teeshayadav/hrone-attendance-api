@@ -16,7 +16,7 @@ from typing import Literal, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field, StrictInt, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
 
@@ -132,6 +132,13 @@ class PunchOutIn(BaseModel):
     emp_code: str
     punched_at: Optional[StrictInt] = Field(default=None, ge=100000000000, le=4102444800000)
 
+class RegularizeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None
+    punch_in: Optional[StrictInt] = Field(default=None, ge=100000000000, le=4102444800000)
+    punch_out: Optional[StrictInt] = Field(default=None, ge=100000000000, le=4102444800000)
+    reason: str = Field(min_length=5, max_length=200)
+    regularized_by: str = Field(min_length=1, max_length=50)
 
 # --------------------------------------------------------------------------- #
 # Endpoints provided
@@ -290,6 +297,88 @@ def list_attendance(
     )
     items = [format_record(d) for d in cursor]
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+def same(a, b):
+    if isinstance(a, datetime) and isinstance(b, datetime):
+        return as_utc(a) == as_utc(b)
+    return a == b
+
+
+@app.patch("/attendance/{emp_code}/{date}")
+def regularize(emp_code: str, date: str, body: RegularizeIn):
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(422, "date must be a real date (YYYY-MM-DD)")
+    emp = db.employees.find_one({"emp_code": emp_code})
+    if not emp:
+        raise HTTPException(404, "employee not found")
+    rec = db.attendance_logs.find_one({"emp_code": emp_code, "date": date})
+    if not rec:
+        raise HTTPException(404, "no record for this date")
+
+    old = {
+        "status": rec["status"],
+        "punch_in": rec.get("punch_in"),
+        "punch_out": rec.get("punch_out"),
+        "work_hours": rec.get("work_hours"),
+        "late_minutes": rec.get("late_minutes", 0),
+        "overtime_minutes": rec.get("overtime_minutes", 0),
+        "half_day": rec.get("half_day", False),
+    }
+    new = dict(old)
+    if body.status is not None:
+        new["status"] = body.status
+    if body.punch_in is not None:
+        new["punch_in"] = from_millis(body.punch_in)
+    if body.punch_out is not None:
+        new["punch_out"] = from_millis(body.punch_out)
+
+    if new["status"] in ("ABSENT", "LEAVE"):
+        if body.punch_in is not None or body.punch_out is not None:
+            raise HTTPException(422, "ABSENT/LEAVE cannot have punch times")
+        new.update(punch_in=None, punch_out=None, work_hours=None,
+                   late_minutes=0, overtime_minutes=0, half_day=False)
+    else:
+        if new["punch_in"] is None:
+            raise HTTPException(422, "a presence status needs a punch_in")
+        pin = as_utc(new["punch_in"])
+        if body.punch_in is not None and attendance_date(pin, emp["shift_start"], emp["shift_end"]) != date:
+            raise HTTPException(422, "punch_in must stay on the record's attendance date")
+        pout = new["punch_out"]
+        if pout is not None and (body.punch_in is not None or body.punch_out is not None):
+            pout = as_utc(pout)
+            if pout <= pin or pout > pin + timedelta(hours=24):
+                raise HTTPException(422, "punch_out must be after punch_in and within 24 hours")
+        new["late_minutes"] = compute_late_minutes(pin, emp["shift_start"], date)
+        if pout is not None:
+            new["work_hours"] = compute_work_hours(pin, pout)
+            new["overtime_minutes"] = compute_overtime(pout, emp["shift_start"], emp["shift_end"], date)
+            new["half_day"] = new["work_hours"] < 4.5
+        else:
+            new["work_hours"] = None
+            new["overtime_minutes"] = 0
+            new["half_day"] = False
+
+    changes = {k: {"from": old[k], "to": new[k]} for k in new if not same(old[k], new[k])}
+    if not changes:
+        raise HTTPException(422, "nothing to change")
+
+    entry = {
+        "at": datetime.now(timezone.utc).replace(microsecond=0),
+        "by": body.regularized_by,
+        "reason": body.reason,
+        "changes": changes,
+    }
+    seen = len(rec.get("history") or [])
+    updated = db.attendance_logs.find_one_and_update(
+        {"_id": rec["_id"], "$expr": {"$eq": [{"$size": {"$ifNull": ["$history", []]}}, seen]}},
+        {"$set": new, "$push": {"history": entry}},
+        return_document=True,
+    )
+    if updated is None:
+        raise HTTPException(409, "record was changed by someone else, retry")
+    return format_record(updated)
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
 #   POST  /attendance/punch-out
