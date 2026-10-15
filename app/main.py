@@ -15,7 +15,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Literal, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field, StrictInt, field_validator
 from pymongo import MongoClient
 from pymongo.errors import DuplicateKeyError
@@ -31,6 +31,7 @@ IST = timezone(timedelta(hours=5, minutes=30))
 async def lifespan(app):
     db.employees.create_index("emp_code", unique=True)
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
+    db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
     yield
 
 
@@ -54,6 +55,28 @@ def attendance_date(punch_in: datetime, shift_start: str, shift_end: str) -> str
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def ms_or_none(v):
+    return to_millis(v) if isinstance(v, datetime) else v
+
+
+def format_record(d: dict) -> dict:
+    d.pop("_id", None)
+    d["punch_in"] = ms_or_none(d.get("punch_in"))
+    d["punch_out"] = ms_or_none(d.get("punch_out"))
+    d.setdefault("half_day", False)
+    d.setdefault("work_hours", None)
+    d.setdefault("late_minutes", 0)
+    d.setdefault("overtime_minutes", 0)
+    history = d.get("history") or []
+    for h in history:
+        h["at"] = ms_or_none(h.get("at"))
+        for ch in (h.get("changes") or {}).values():
+            if isinstance(ch, dict):
+                ch["from"] = ms_or_none(ch.get("from"))
+                ch["to"] = ms_or_none(ch.get("to"))
+    d["history"] = history
+    return d
+
 def compute_late_minutes(punch_in: datetime, shift_start: str, date_str: str) -> int:
     h, m = map(int, shift_start.split(":"))
     start = datetime.fromisoformat(date_str).replace(hour=h, minute=m, tzinfo=IST)
@@ -117,7 +140,6 @@ def health():
 
 
 @app.post("/employees", status_code=201)
-@app.post("/employees", status_code=201)
 def create_employee(body: EmployeeIn):
     doc = body.model_dump()
     doc["created_at"] = datetime.now(timezone.utc).replace(microsecond=0)
@@ -173,7 +195,7 @@ def punch_in(body: PunchInIn):
     doc["punch_in"] = to_millis(doc["punch_in"])
     return doc
 
-@app.post("/attendance/punch-out")
+
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):
     emp = db.employees.find_one({"emp_code": body.emp_code})
@@ -189,7 +211,7 @@ def punch_out(body: PunchOutIn):
     )
     if not rec:
         raise HTTPException(404, "no punch-in found")
-    if rec["punch_out"] is not None:
+    if rec.get("punch_out") is not None:
         raise HTTPException(409, "already punched out")
     pin = as_utc(rec["punch_in"])
     if ts <= pin or ts > pin + timedelta(hours=24):
@@ -212,16 +234,18 @@ def punch_out(body: PunchOutIn):
     updated["punch_in"] = to_millis(updated["punch_in"])
     updated["punch_out"] = to_millis(updated["punch_out"])
     return updated
-    
+
 @app.get("/attendance")
 def list_attendance(
     emp_code: Optional[str] = None,
-    date_from: Optional[str] = None,
-    date_to: Optional[str] = None,
-    status: Optional[str] = None,
-    page: int = 1,
-    page_size: int = 20,
+    date_from: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
 ):
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from must not be after date_to")
     q = {}
     if emp_code:
         q["emp_code"] = emp_code
@@ -233,15 +257,15 @@ def list_attendance(
             q["date"]["$lte"] = date_to
     if status:
         q["status"] = status
-    docs = list(db.attendance_logs.find(q))
-    docs.sort(key=lambda d: d["date"], reverse=True)
-    total = len(docs)
-    page_docs = docs[(page - 1) * page_size : page * page_size]
-    for d in page_docs:
-        d["id"] = str(d.pop("_id"))
-    return {"items": page_docs, "total": total, "page": page, "page_size": page_size}
-
-
+    total = db.attendance_logs.count_documents(q)
+    cursor = (
+        db.attendance_logs.find(q, {"_id": 0})
+        .sort([("date", -1), ("emp_code", 1)])
+        .skip((page - 1) * page_size)
+        .limit(page_size)
+    )
+    items = [format_record(d) for d in cursor]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
 #   POST  /attendance/punch-out

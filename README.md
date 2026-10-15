@@ -12,10 +12,12 @@ Indexes are created at startup.
 ## Done
 - POST /employees, GET /employees
 - POST /attendance/punch-in
+- POST /attendance/punch-out
+- GET /attendance
 - Part A review: see REVIEW.md
 
 ## Not done yet
-- POST /attendance/punch-out
 - PATCH /attendance/{emp_code}/{date}
-- GET /attendance (starter version still has known issues)
-- Analytics endpoints and /admin/explain
+- Analytics endpoints (monthly, department summary, late leaderboard, trend)
+- /admin/explain
+- Small gaps: /health does not return 503 when MongoDB is down; GET /employees is not sorted by emp_code and has no page_size limit
