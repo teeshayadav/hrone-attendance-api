@@ -448,6 +448,65 @@ def employee_monthly(emp_code: str, month: str = Query(pattern=MONTH_PATTERN)):
         "total_overtime_minutes": agg.get("total_overtime_minutes", 0),
         "attendance_pct": pct,
     }
+
+def department_summary_pipeline(month: str, department: Optional[str] = None):
+    first, last = f"{month}-01", f"{month}-31"
+    weekdays = weekday_dates(month)
+    emp_match = {"joined_on": {"$lte": last}}
+    if department:
+        emp_match["department"] = department
+    lookup = {"$lookup": {
+        "from": "attendance_logs",
+        "localField": "emp_code",
+        "foreignField": "emp_code",
+        "pipeline": [{"$match": {"date": {"$gte": first, "$lte": last}}}],
+        "as": "logs",
+    }}
+    is_present = {"$in": ["$logs.status", ["PRESENT", "WFH", "ON_DUTY"]]}
+    has_hours = {"$and": [is_present, {"$gt": ["$logs.work_hours", None]}]}
+    late = {"$ifNull": ["$logs.late_minutes", 0]}
+    return [
+        {"$match": emp_match},
+        lookup,
+        {"$unwind": {"path": "$logs", "preserveNullAndEmptyArrays": True}},
+        {"$group": {
+            "_id": "$department",
+            "emps": {"$addToSet": "$emp_code"},
+            "present_days": {"$sum": {"$cond": [
+                {"$and": [is_present, {"$in": ["$logs.date", weekdays]}]},
+                {"$cond": [{"$eq": [{"$ifNull": ["$logs.half_day", False]}, True]}, 0.5, 1]},
+                0,
+            ]}},
+            "hours_sum": {"$sum": {"$cond": [has_hours, "$logs.work_hours", 0]}},
+            "hours_n": {"$sum": {"$cond": [has_hours, 1, 0]}},
+            "late_count": {"$sum": {"$cond": [{"$gt": [late, 0]}, 1, 0]}},
+            "total_late_minutes": {"$sum": late},
+            "leave_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "LEAVE"]}, 1, 0]}},
+            "on_duty_count": {"$sum": {"$cond": [{"$eq": ["$logs.status", "ON_DUTY"]}, 1, 0]}},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+
+
+@app.get("/analytics/departments/summary")
+def department_summary(month: str = Query(pattern=MONTH_PATTERN), department: Optional[str] = None):
+    items = []
+    for row in db.employees.aggregate(department_summary_pipeline(month, department)):
+        n = row["hours_n"]
+        avg = None
+        if n > 0:
+            avg = round_half_up(Decimal(str(round(row["hours_sum"], 2))) / Decimal(n), 2)
+        items.append({
+            "department": row["_id"],
+            "headcount": len(row["emps"]),
+            "present_days": row["present_days"],
+            "avg_work_hours": avg,
+            "late_count": row["late_count"],
+            "total_late_minutes": row["total_late_minutes"],
+            "leave_count": row["leave_count"],
+            "on_duty_count": row["on_duty_count"],
+        })
+    return {"month": month, "items": items}
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
 #   POST  /attendance/punch-out
