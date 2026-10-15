@@ -581,6 +581,79 @@ def late_leaderboard(
     items = list(db.attendance_logs.aggregate(leaderboard_pipeline(month, limit, department)))
     return {"month": month, "items": items}
 
+PRESENCE = ["PRESENT", "WFH", "ON_DUTY"]
+
+
+def trend_pipeline(emp_codes, joined, d_from, d_to):
+    date_from = d_from.strftime("%Y-%m-%d")
+    date_to = d_to.strftime("%Y-%m-%d")
+    return [
+        {"$match": {"emp_code": {"$in": emp_codes}, "date": {"$gte": date_from, "$lte": date_to}}},
+        {"$group": {
+            "_id": "$date",
+            "present_count": {"$sum": {"$cond": [
+                {"$in": ["$status", PRESENCE]},
+                {"$cond": [{"$eq": [{"$ifNull": ["$half_day", False]}, True]}, 0.5, 1]},
+                0,
+            ]}},
+            "late_count": {"$sum": {"$cond": [{"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]}, 1, 0]}},
+        }},
+        {"$addFields": {"d": {"$dateFromString": {"dateString": "$_id", "format": "%Y-%m-%d"}}}},
+        {"$densify": {"field": "d", "range": {
+            "step": 1, "unit": "day",
+            "bounds": [d_from, d_to + timedelta(days=1)],
+        }}},
+        {"$sort": {"d": 1}},
+        {"$addFields": {
+            "date": {"$dateToString": {"date": "$d", "format": "%Y-%m-%d"}},
+            "present_count": {"$ifNull": ["$present_count", 0]},
+            "late_count": {"$ifNull": ["$late_count", 0]},
+            "is_working_day": {"$lte": [{"$isoDayOfWeek": "$d"}, 5]},
+        }},
+        {"$addFields": {"headcount": {"$size": {"$filter": {
+            "input": joined, "as": "j", "cond": {"$lte": ["$$j", "$date"]},
+        }}}}},
+        {"$addFields": {"attendance_rate": {"$cond": [
+            {"$and": ["$is_working_day", {"$gt": ["$headcount", 0]}]},
+            {"$divide": [{"$floor": {"$divide": [
+                {"$add": [{"$multiply": ["$present_count", 20000]}, "$headcount"]},
+                {"$multiply": [2, "$headcount"]},
+            ]}}, 10000]},
+            None,
+        ]}}},
+        {"$setWindowFields": {"sortBy": {"d": 1}, "output": {
+            "moving_avg_7d": {"$avg": "$attendance_rate", "window": {"documents": [-6, 0]}},
+        }}},
+        {"$project": {
+            "_id": 0, "date": 1, "is_working_day": 1, "headcount": 1,
+            "present_count": 1, "late_count": 1, "attendance_rate": 1, "moving_avg_7d": 1,
+        }},
+    ]
+@app.get("/analytics/departments/{department}/trend")
+def department_trend(
+    department: str,
+    from_: str = Query(alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    to: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+):
+    try:
+        d_from = datetime.strptime(from_, "%Y-%m-%d")
+        d_to = datetime.strptime(to, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(422, "from and to must be real dates (YYYY-MM-DD)")
+    if d_to < d_from:
+        raise HTTPException(422, "to must not be before from")
+    if (d_to - d_from).days + 1 > 92:
+        raise HTTPException(422, "range must not exceed 92 days")
+    if db.employees.count_documents({"department": department}, limit=1) == 0:
+        raise HTTPException(404, "department not found")
+    emps = list(db.employees.find({"department": department}, {"_id": 0, "emp_code": 1, "joined_on": 1}))
+    emp_codes = [e["emp_code"] for e in emps]
+    joined = [e["joined_on"] for e in emps]
+    rows = list(db.attendance_logs.aggregate(trend_pipeline(emp_codes, joined, d_from, d_to)))
+    for r in rows:
+        m = r.get("moving_avg_7d")
+        r["moving_avg_7d"] = None if m is None else round_half_up(round(m, 10), 4)
+    return {"department": department, "items": rows}
 
 class ExplainTarget(str, Enum):
     attendance_list = "attendance_list"
