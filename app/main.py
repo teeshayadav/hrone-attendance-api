@@ -507,6 +507,49 @@ def department_summary(month: str = Query(pattern=MONTH_PATTERN), department: Op
             "on_duty_count": row["on_duty_count"],
         })
     return {"month": month, "items": items}
+
+
+def leaderboard_pipeline(month: str, limit: int, department: Optional[str] = None):
+    first, last = f"{month}-01", f"{month}-31"
+    late = {"$ifNull": ["$late_minutes", 0]}
+    pipe = [
+        {"$match": {"date": {"$gte": first, "$lte": last}}},
+        {"$group": {
+            "_id": "$emp_code",
+            "total_late_minutes": {"$sum": late},
+            "late_count": {"$sum": {"$cond": [{"$gt": [late, 0]}, 1, 0]}},
+        }},
+        {"$match": {"total_late_minutes": {"$gt": 0}}},
+        {"$lookup": {"from": "employees", "localField": "_id", "foreignField": "emp_code", "as": "emp"}},
+        {"$unwind": "$emp"},
+    ]
+    if department:
+        pipe.append({"$match": {"emp.department": department}})
+    pipe += [
+        {"$setWindowFields": {"sortBy": {"total_late_minutes": -1}, "output": {"rank": {"$rank": {}}}}},
+        {"$match": {"rank": {"$lte": limit}}},
+        {"$sort": {"total_late_minutes": -1, "_id": 1}},
+        {"$project": {
+            "_id": 0,
+            "rank": 1,
+            "emp_code": "$_id",
+            "name": "$emp.name",
+            "department": "$emp.department",
+            "total_late_minutes": 1,
+            "late_count": 1,
+        }},
+    ]
+    return pipe
+
+
+@app.get("/analytics/leaderboard/late")
+def late_leaderboard(
+    month: str = Query(pattern=MONTH_PATTERN),
+    limit: int = Query(default=10, ge=1, le=50),
+    department: Optional[str] = None,
+):
+    items = list(db.attendance_logs.aggregate(leaderboard_pipeline(month, limit, department)))
+    return {"month": month, "items": items}
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
 #   POST  /attendance/punch-out
