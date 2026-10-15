@@ -33,6 +33,7 @@ async def lifespan(app):
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
     db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
     db.employees.create_index([("department", 1), ("emp_code", 1)])
+    db.employees.create_index([("joined_on", 1), ("department", 1)])
     yield
 
 
@@ -266,17 +267,10 @@ def punch_out(body: PunchOutIn):
     updated["punch_out"] = to_millis(updated["punch_out"])
     return updated
 
-@app.get("/attendance")
-def list_attendance(
-    emp_code: Optional[str] = None,
-    date_from: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    date_to: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
-    page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
-):
-    if date_from and date_to and date_from > date_to:
-        raise HTTPException(422, "date_from must not be after date_to")
+ATTENDANCE_SORT = [("date", -1), ("emp_code", 1)]
+
+
+def attendance_filter(emp_code, date_from, date_to, status) -> dict:
     q = {}
     if emp_code:
         q["emp_code"] = emp_code
@@ -288,10 +282,43 @@ def list_attendance(
             q["date"]["$lte"] = date_to
     if status:
         q["status"] = status
+    return q
+
+
+ATTENDANCE_SORT = [("date", -1), ("emp_code", 1)]
+
+
+def attendance_filter(emp_code, date_from, date_to, status) -> dict:
+    q = {}
+    if emp_code:
+        q["emp_code"] = emp_code
+    if date_from or date_to:
+        q["date"] = {}
+        if date_from:
+            q["date"]["$gte"] = date_from
+        if date_to:
+            q["date"]["$lte"] = date_to
+    if status:
+        q["status"] = status
+    return q
+
+
+@app.get("/attendance")
+def list_attendance(
+    emp_code: Optional[str] = None,
+    date_from: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+):
+    if date_from and date_to and date_from > date_to:
+        raise HTTPException(422, "date_from must not be after date_to")
+    q = attendance_filter(emp_code, date_from, date_to, status)
     total = db.attendance_logs.count_documents(q)
     cursor = (
         db.attendance_logs.find(q, {"_id": 0})
-        .sort([("date", -1), ("emp_code", 1)])
+        .sort(ATTENDANCE_SORT)
         .skip((page - 1) * page_size)
         .limit(page_size)
     )
