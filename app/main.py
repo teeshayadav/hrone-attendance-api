@@ -9,6 +9,9 @@ works, but nobody has reviewed it. Read PROBLEM_STATEMENT.docx for what is expec
 openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
 """
 import os
+import json
+from enum import Enum
+from bson import json_util
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -577,6 +580,62 @@ def late_leaderboard(
 ):
     items = list(db.attendance_logs.aggregate(leaderboard_pipeline(month, limit, department)))
     return {"month": month, "items": items}
+
+
+class ExplainTarget(str, Enum):
+    attendance_list = "attendance_list"
+    employee_monthly = "employee_monthly"
+    department_summary = "department_summary"
+    late_leaderboard = "late_leaderboard"
+    department_trend = "department_trend"
+
+
+@app.get("/admin/explain/{endpoint}")
+def admin_explain(
+    endpoint: ExplainTarget,
+    emp_code: Optional[str] = None,
+    month: Optional[str] = Query(default=None, pattern=MONTH_PATTERN),
+    department: Optional[str] = None,
+    limit: int = Query(default=10, ge=1, le=50),
+    date_from: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    date_to: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    status: Optional[Literal["PRESENT", "ABSENT", "LEAVE", "WFH", "ON_DUTY"]] = None,
+    from_: Optional[str] = Query(default=None, alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    to: Optional[str] = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+):
+    if endpoint == ExplainTarget.attendance_list:
+        coll = "attendance_logs"
+        cmd = {
+            "find": coll,
+            "filter": attendance_filter(emp_code, date_from, date_to, status),
+            "sort": dict(ATTENDANCE_SORT),
+            "skip": (page - 1) * page_size,
+            "limit": page_size,
+        }
+    elif endpoint == ExplainTarget.employee_monthly:
+        if not emp_code or not month:
+            raise HTTPException(422, "emp_code and month are required")
+        coll = "attendance_logs"
+        cmd = {"aggregate": coll, "pipeline": monthly_pipeline(emp_code, month), "cursor": {}}
+    elif endpoint == ExplainTarget.department_summary:
+        if not month:
+            raise HTTPException(422, "month is required")
+        coll = "employees"
+        cmd = {"aggregate": coll, "pipeline": department_summary_pipeline(month, department), "cursor": {}}
+    elif endpoint == ExplainTarget.late_leaderboard:
+        if not month:
+            raise HTTPException(422, "month is required")
+        coll = "attendance_logs"
+        cmd = {"aggregate": coll, "pipeline": leaderboard_pipeline(month, limit, department), "cursor": {}}
+    else:
+        if not department or not from_ or not to:
+            raise HTTPException(422, "department, from and to are required")
+        raise HTTPException(501, "trend endpoint is not built yet")
+
+    result = db.command({"explain": cmd, "verbosity": "executionStats"})
+    return {"endpoint": endpoint.value, "collection": coll, "explain": json.loads(json_util.dumps(result))}
 # --------------------------------------------------------------------------- #
 # TODO - the rest of the contract (see openapi.yaml):
 #   POST  /attendance/punch-out
