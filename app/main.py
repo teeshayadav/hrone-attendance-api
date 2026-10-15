@@ -22,7 +22,7 @@ from pymongo.errors import DuplicateKeyError
 
 load_dotenv()
 
-client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
+client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"), serverSelectionTimeoutMS=3000)
 db = client[os.getenv("MONGO_DB", "attendance_db")]
 
 IST = timezone(timedelta(hours=5, minutes=30))
@@ -32,7 +32,9 @@ async def lifespan(app):
     db.employees.create_index("emp_code", unique=True)
     db.attendance_logs.create_index([("emp_code", 1), ("date", 1)], unique=True)
     db.attendance_logs.create_index([("date", -1), ("emp_code", 1)])
+    db.employees.create_index([("department", 1), ("emp_code", 1)])
     yield
+
 
 
 app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
@@ -134,8 +136,13 @@ class PunchOutIn(BaseModel):
 # --------------------------------------------------------------------------- #
 # Endpoints provided
 # --------------------------------------------------------------------------- #
+
 @app.get("/health")
 def health():
+    try:
+        client.admin.command("ping")
+    except Exception:
+        raise HTTPException(503, "database unavailable")
     return {"status": "ok"}
 
 
@@ -151,18 +158,35 @@ def create_employee(body: EmployeeIn):
     doc["created_at"] = to_millis(doc["created_at"])
     return doc
 
-
 @app.get("/employees")
-def list_employees(department: Optional[str] = None, page: int = 1, page_size: int = 20):
+def list_employees(
+    department: Optional[str] = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+):
     q = {}
     if department:
         q["department"] = department
+
     skip = (page - 1) * page_size
     total = db.employees.count_documents(q)
-    items = list(db.employees.find(q, {"_id": 0}).skip(skip).limit(page_size))
+
+    items = list(
+        db.employees.find(q, {"_id": 0})
+        .sort("emp_code", 1)
+        .skip(skip)
+        .limit(page_size)
+    )
+
     for e in items:
         e["created_at"] = to_millis(e["created_at"])
-    return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @app.post("/attendance/punch-in", status_code=201)
