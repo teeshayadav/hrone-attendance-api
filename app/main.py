@@ -629,12 +629,8 @@ def trend_pipeline(emp_codes, joined, d_from, d_to):
             "present_count": 1, "late_count": 1, "attendance_rate": 1, "moving_avg_7d": 1,
         }},
     ]
-@app.get("/analytics/departments/{department}/trend")
-def department_trend(
-    department: str,
-    from_: str = Query(alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    to: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
-):
+
+def build_trend(department: str, from_: str, to: str):
     try:
         d_from = datetime.strptime(from_, "%Y-%m-%d")
         d_to = datetime.strptime(to, "%Y-%m-%d")
@@ -644,12 +640,21 @@ def department_trend(
         raise HTTPException(422, "to must not be before from")
     if (d_to - d_from).days + 1 > 92:
         raise HTTPException(422, "range must not exceed 92 days")
-    if db.employees.count_documents({"department": department}, limit=1) == 0:
-        raise HTTPException(404, "department not found")
     emps = list(db.employees.find({"department": department}, {"_id": 0, "emp_code": 1, "joined_on": 1}))
+    if not emps:
+        raise HTTPException(404, "department not found")
     emp_codes = [e["emp_code"] for e in emps]
     joined = [e["joined_on"] for e in emps]
-    rows = list(db.attendance_logs.aggregate(trend_pipeline(emp_codes, joined, d_from, d_to)))
+    return trend_pipeline(emp_codes, joined, d_from, d_to)
+
+
+@app.get("/analytics/departments/{department}/trend")
+def department_trend(
+    department: str,
+    from_: str = Query(alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    to: str = Query(pattern=r"^\d{4}-\d{2}-\d{2}$"),
+):
+    rows = list(db.attendance_logs.aggregate(build_trend(department, from_, to)))
     for r in rows:
         m = r.get("moving_avg_7d")
         r["moving_avg_7d"] = None if m is None else round_half_up(round(m, 10), 4)
@@ -705,7 +710,8 @@ def admin_explain(
     else:
         if not department or not from_ or not to:
             raise HTTPException(422, "department, from and to are required")
-        raise HTTPException(501, "trend endpoint is not built yet")
+        coll = "attendance_logs"
+        cmd = {"aggregate": coll, "pipeline": build_trend(department, from_, to), "cursor": {}}
 
     result = db.command({"explain": cmd, "verbosity": "executionStats"})
     return {"endpoint": endpoint.value, "collection": coll, "explain": json.loads(json_util.dumps(result))}
